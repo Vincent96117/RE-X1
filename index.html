@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>V1.4 嘎空回測實驗室</title>
+    <style>
+        :root { --bg: #0b0e11; --card: #181a20; --ready: #f0b90b; --entry: #f6465d; --hold: #2ebd85; --text: #eaecef; }
+        body { background: var(--bg); color: var(--text); font-family: sans-serif; padding: 20px; }
+        .box { background: var(--card); padding: 20px; border-radius: 10px; border: 1px solid #333; margin-bottom: 20px; }
+        input { background: #333; color: #fff; border: 1px solid #555; padding: 8px; border-radius: 5px; }
+        button { background: var(--ready); color: #000; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th { background: #1e2329; color: #848e9c; padding: 12px; text-align: left; }
+        td { padding: 12px; border-bottom: 1px solid #2b2f36; }
+        .win { color: var(--hold); font-weight: bold; }
+        .loss { color: var(--entry); }
+    </style>
+</head>
+<body>
+
+<div class="box">
+    <h2>V1.4 嘎空邏輯回測 (過去 90 天模擬)</h2>
+    <input type="text" id="symbol" value="DUSKUSDT" placeholder="輸入幣種 (如 BOMEUSDT)">
+    <button onclick="runBacktest()">開始分析歷史數據</button>
+    <span id="loading" style="margin-left:10px; color: #888;"></span>
+</div>
+
+<div id="result-summary" class="box" style="display:none;">
+    <h3>回測總結</h3>
+    <div id="stats"></div>
+</div>
+
+<table id="result-table">
+    <thead>
+        <tr>
+            <th>點火時間</th>
+            <th>突破價格</th>
+            <th>當時資費</th>
+            <th>24h 最大漲幅</th>
+            <th>回測結果</th>
+        </tr>
+    </thead>
+    <tbody id="result-list"></tbody>
+</table>
+
+<script>
+    async function runBacktest() {
+        const symbol = document.getElementById('symbol').value.toUpperCase();
+        const loading = document.getElementById('loading');
+        const list = document.getElementById('result-list');
+        loading.innerText = "正在抓取歷史 K 線與資費 (請稍候)...";
+        list.innerHTML = "";
+
+        try {
+            // 1. 抓取 4H K線 (最多 500 根，約 83 天)
+            const kRes = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=4h&limit=500`);
+            const kData = await kRes.json();
+            
+            // 2. 抓取歷史資費
+            const fRes = await fetch(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=${symbol}&limit=500`);
+            const fData = await fRes.json();
+
+            let hits = 0;
+            let totalProfit = 0;
+
+            // 從第 42 根開始回測 (因為需要前 7 天做為參考)
+            for (let i = 42; i < kData.length - 6; i++) {
+                const currentK = kData[i];
+                const high7D = Math.max(...kData.slice(i-42, i).map(k => parseFloat(k[2])));
+                const openPrice = parseFloat(currentK[1]);
+                const highPrice = parseFloat(currentK[2]);
+
+                // 判斷該根 K 線是否有突破 7D High
+                if (highPrice > high7D * 1.002) {
+                    // 尋找當時最接近的資費紀錄
+                    const time = currentK[0];
+                    const funding = fData.find(f => Math.abs(f.fundingTime - time) < 14400000);
+                    const fundRate = funding ? parseFloat(funding.fundingRate) * 100 : 0;
+
+                    // 邏輯判定：資費 < -0.05% 且點火
+                    if (fundRate < -0.05) {
+                        hits++;
+                        // 計算後續 24 小時 (6 根 4H K線) 的最高漲幅
+                        const futureK = kData.slice(i, i+6);
+                        const maxFuturePrice = Math.max(...futureK.map(k => parseFloat(k[2])));
+                        const profit = ((maxFuturePrice - high7D) / high7D * 100).toFixed(2);
+                        totalProfit += parseFloat(profit);
+
+                        const date = new Date(time).toLocaleDateString();
+                        const row = `
+                            <tr>
+                                <td>${date}</td>
+                                <td>${high7D.toFixed(4)}</td>
+                                <td style="color:#00ffff">${fundRate.toFixed(4)}%</td>
+                                <td class="${profit > 5 ? 'win' : 'loss'}">${profit}%</td>
+                                <td>${profit > 2 ? '✅ 成功嘎空' : '❌ 動能不足'}</td>
+                            </tr>
+                        `;
+                        list.insertAdjacentHTML('beforeend', row);
+                    }
+                }
+            }
+
+            loading.innerText = "回測完成！";
+            document.getElementById('result-summary').style.display = "block";
+            document.getElementById('stats').innerHTML = `
+                符合條件次數：${hits} 次<br>
+                平均潛在漲幅：${(totalProfit/hits).toFixed(2)}%<br>
+                註：回測基於 4H 數據，實戰 1m 數據噴發會更精確。
+            `;
+
+        } catch (e) {
+            loading.innerText = "出錯了，請檢查幣種名稱是否正確。";
+        }
+    }
+</script>
+</body>
+</html>
