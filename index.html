@@ -2,42 +2,66 @@
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <title>V1.4 嘎空回測實驗室</title>
+    <title>V1.5 嘎空回測實驗室 (靈敏度可調版)</title>
     <style>
         :root { --bg: #0b0e11; --card: #181a20; --ready: #f0b90b; --entry: #f6465d; --hold: #2ebd85; --text: #eaecef; }
-        body { background: var(--bg); color: var(--text); font-family: sans-serif; padding: 20px; }
+        body { background: var(--bg); color: var(--text); font-family: sans-serif; padding: 20px; line-height: 1.6; }
         .box { background: var(--card); padding: 20px; border-radius: 10px; border: 1px solid #333; margin-bottom: 20px; }
-        input { background: #333; color: #fff; border: 1px solid #555; padding: 8px; border-radius: 5px; }
-        button { background: var(--ready); color: #000; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; font-weight: bold; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-top: 15px; }
+        label { display: block; font-size: 12px; color: #888; margin-bottom: 5px; }
+        input[type="text"], input[type="number"], select { background: #333; color: #fff; border: 1px solid #555; padding: 8px; border-radius: 5px; width: 100%; box-sizing: border-box; }
+        button { background: var(--ready); color: #000; border: none; padding: 12px; border-radius: 5px; cursor: pointer; font-weight: bold; width: 100%; margin-top: 10px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }
         th { background: #1e2329; color: #848e9c; padding: 12px; text-align: left; }
         td { padding: 12px; border-bottom: 1px solid #2b2f36; }
         .win { color: var(--hold); font-weight: bold; }
         .loss { color: var(--entry); }
+        .summary-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; text-align: center; }
+        .summary-item { background: #222; padding: 10px; border-radius: 5px; }
     </style>
 </head>
 <body>
 
 <div class="box">
-    <h2>V1.4 嘎空邏輯回測 (過去 90 天模擬)</h2>
-    <input type="text" id="symbol" value="DUSKUSDT" placeholder="輸入幣種 (如 BOMEUSDT)">
-    <button onclick="runBacktest()">開始分析歷史數據</button>
-    <span id="loading" style="margin-left:10px; color: #888;"></span>
+    <h2 style="color:var(--ready); margin-top:0;">V1.5 嘎空回測實驗室</h2>
+    <div class="controls">
+        <div>
+            <label>幣種名稱 (USDT 結尾)</label>
+            <input type="text" id="symbol" value="DUSKUSDT">
+        </div>
+        <div>
+            <label>結構週期 (天)</label>
+            <select id="lookbackDays">
+                <option value="3">3 天 (靈敏 - 抓小浪)</option>
+                <option value="5">5 天 (中庸)</option>
+                <option value="7" selected>7 天 (穩健 - 抓大肉)</option>
+            </select>
+        </div>
+        <div>
+            <label>資費門檻 (%)</label>
+            <input type="number" id="fundThreshold" value="-0.03" step="0.01">
+        </div>
+    </div>
+    <button onclick="runBacktest()">🔥 執行靈敏度回測</button>
+    <div id="loading" style="text-align:center; margin-top:10px; color:var(--ready);"></div>
 </div>
 
 <div id="result-summary" class="box" style="display:none;">
-    <h3>回測總結</h3>
-    <div id="stats"></div>
+    <div class="summary-grid">
+        <div class="summary-item"><div id="totalHits" style="font-size:20px; font-weight:bold;">0</div><div>觸發次數</div></div>
+        <div class="summary-item"><div id="avgProfit" style="font-size:20px; font-weight:bold; color:var(--hold);">0%</div><div>平均最大漲幅</div></div>
+        <div class="summary-item"><div id="winRate" style="font-size:20px; font-weight:bold; color:var(--ready);">0%</div><div>噴發成功率 (>3%)</div></div>
+    </div>
 </div>
 
 <table id="result-table">
     <thead>
         <tr>
-            <th>點火時間</th>
-            <th>突破價格</th>
+            <th>日期</th>
+            <th>突破點位</th>
             <th>當時資費</th>
             <th>24h 最大漲幅</th>
-            <th>回測結果</th>
+            <th>狀態</th>
         </tr>
     </thead>
     <tbody id="result-list"></tbody>
@@ -46,54 +70,60 @@
 <script>
     async function runBacktest() {
         const symbol = document.getElementById('symbol').value.toUpperCase();
+        const lookbackDays = parseInt(document.getElementById('lookbackDays').value);
+        const fundThreshold = parseFloat(document.getElementById('fundThreshold').value);
         const loading = document.getElementById('loading');
         const list = document.getElementById('result-list');
-        loading.innerText = "正在抓取歷史 K 線與資費 (請稍候)...";
+        
+        // 清空舊數據
+        loading.innerText = "📅 正在穿越時空抓取歷史數據...";
         list.innerHTML = "";
+        document.getElementById('result-summary').style.display = "none";
 
         try {
-            // 1. 抓取 4H K線 (最多 500 根，約 83 天)
+            // 抓取 4H 數據 (幣安上限 500 根 = 約 83 天)
             const kRes = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=4h&limit=500`);
             const kData = await kRes.json();
             
-            // 2. 抓取歷史資費
+            // 抓取資費紀錄
             const fRes = await fetch(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=${symbol}&limit=500`);
             const fData = await fRes.json();
 
+            const lookbackPeriods = (lookbackDays * 24) / 4; // 天數轉為 4H 根數
             let hits = 0;
             let totalProfit = 0;
+            let wins = 0;
 
-            // 從第 42 根開始回測 (因為需要前 7 天做為參考)
-            for (let i = 42; i < kData.length - 6; i++) {
+            for (let i = lookbackPeriods; i < kData.length - 6; i++) {
                 const currentK = kData[i];
-                const high7D = Math.max(...kData.slice(i-42, i).map(k => parseFloat(k[2])));
-                const openPrice = parseFloat(currentK[1]);
-                const highPrice = parseFloat(currentK[2]);
+                const highRecent = Math.max(...kData.slice(i - lookbackPeriods, i).map(k => parseFloat(k[2])));
+                const currentHigh = parseFloat(currentK[2]);
+                const time = currentK[0];
 
-                // 判斷該根 K 線是否有突破 7D High
-                if (highPrice > high7D * 1.002) {
-                    // 尋找當時最接近的資費紀錄
-                    const time = currentK[0];
-                    const funding = fData.find(f => Math.abs(f.fundingTime - time) < 14400000);
-                    const fundRate = funding ? parseFloat(funding.fundingRate) * 100 : 0;
+                // 點火條件：突破結構高點
+                if (currentHigh > highRecent * 1.001) {
+                    const funding = fData.find(f => Math.abs(f.fundingTime - time) < 7200000); // 找 2hr 內的資費
+                    const fRate = funding ? parseFloat(funding.fundingRate) * 100 : 0;
 
-                    // 邏輯判定：資費 < -0.05% 且點火
-                    if (fundRate < -0.05) {
+                    // 燃料條件：資費是否低於門檻
+                    if (fRate <= fundThreshold) {
                         hits++;
-                        // 計算後續 24 小時 (6 根 4H K線) 的最高漲幅
-                        const futureK = kData.slice(i, i+6);
-                        const maxFuturePrice = Math.max(...futureK.map(k => parseFloat(k[2])));
-                        const profit = ((maxFuturePrice - high7D) / high7D * 100).toFixed(2);
-                        totalProfit += parseFloat(profit);
+                        // 追蹤後續 24h 最高點
+                        const futureK = kData.slice(i, i + 6);
+                        const maxFuture = Math.max(...futureK.map(k => parseFloat(k[2])));
+                        const profit = ((maxFuture - highRecent) / highRecent * 100);
+                        
+                        if (profit > 3) wins++;
+                        totalProfit += profit;
 
                         const date = new Date(time).toLocaleDateString();
                         const row = `
                             <tr>
                                 <td>${date}</td>
-                                <td>${high7D.toFixed(4)}</td>
-                                <td style="color:#00ffff">${fundRate.toFixed(4)}%</td>
-                                <td class="${profit > 5 ? 'win' : 'loss'}">${profit}%</td>
-                                <td>${profit > 2 ? '✅ 成功嘎空' : '❌ 動能不足'}</td>
+                                <td>${highRecent.toFixed(4)}</td>
+                                <td style="color:#00ffff">${fRate.toFixed(4)}%</td>
+                                <td class="${profit > 5 ? 'win' : (profit < 0 ? 'loss' : '')}">${profit.toFixed(2)}%</td>
+                                <td>${profit > 5 ? '🚀 暴力大嘎' : (profit > 0 ? '✅ 小幅獲利' : '❌ 假突破')}</td>
                             </tr>
                         `;
                         list.insertAdjacentHTML('beforeend', row);
@@ -101,16 +131,17 @@
                 }
             }
 
-            loading.innerText = "回測完成！";
-            document.getElementById('result-summary').style.display = "block";
-            document.getElementById('stats').innerHTML = `
-                符合條件次數：${hits} 次<br>
-                平均潛在漲幅：${(totalProfit/hits).toFixed(2)}%<br>
-                註：回測基於 4H 數據，實戰 1m 數據噴發會更精確。
-            `;
+            // 更新總結
+            if (hits > 0) {
+                document.getElementById('totalHits').innerText = hits;
+                document.getElementById('avgProfit').innerText = (totalProfit / hits).toFixed(2) + "%";
+                document.getElementById('winRate').innerText = ((wins / hits) * 100).toFixed(0) + "%";
+                document.getElementById('result-summary').style.display = "block";
+            }
+            loading.innerText = hits > 0 ? "✅ 回測完成" : "⚠️ 條件太嚴苛，這段時間沒人點火";
 
         } catch (e) {
-            loading.innerText = "出錯了，請檢查幣種名稱是否正確。";
+            loading.innerText = "❌ 錯誤：請確認幣種名稱正確（如 BOMEUSDT）";
         }
     }
 </script>
